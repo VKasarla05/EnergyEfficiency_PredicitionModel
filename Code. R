@@ -1,0 +1,702 @@
+R CODE: 
+########################### Project #################################### 
+## Initializing libraries 
+library(caret) 
+library(corrplot) 
+library(e1071) 
+library(ggplot2) 
+library(reshape2) 
+library(earth) 
+###########################  STEP 0: LOAD DATA  ######################## 
+Original_dataset<-read.csv("~/Desktop/PredictiveModeling/runs_with_standardized_energy.csv"
+) 
+dim(Original_dataset) 
+############################################################################## 
+# Dataset Overview & EDA (till timestamp dataset update) 
+############################################################################## 
+print("Preview of the dataset (first 5 rows, first 33 columns):") 
+Original_dataset[1:5, 1:33] 
+print("All predictors:") 
+names(Original_dataset) 
+cont_vars <- names(continuous_dataset) 
+plot_list <- lapply(cont_vars, function(v) { 
+ggplot(updated_dataset, aes_string(x = v, y = "energy")) + 
+geom_point(alpha = 0.4, color = "orange") + 
+theme_minimal() + 
+labs(title = paste(v, "vs Energy"), x = v, y = "Energy") 
+}) 
+# Show first 6 plots in a grid 
+grid.arrange(grobs = plot_list[1:6], ncol = 3) 
+# Copy for manipulation 
+copy_dataset <- Original_dataset 
+######### Predictors Overview (Original) ######### 
+# Continuous predictors 
+dataset_numeric <- sapply(copy_dataset, is.numeric) 
+continuous_dataset <- copy_dataset[, dataset_numeric] 
+print("Continuous Predictors:") 
+names(continuous_dataset) 
+count_continuous <- sum(dataset_numeric) 
+cat("Number of Continuous Predictors:", count_continuous, "\n") 
+# Categorical predictors 
+categorical_dataset <- copy_dataset[, sapply(copy_dataset, function(x) is.factor(x) || 
+is.character(x))] 
+print("Categorical Predictors:") 
+names(categorical_dataset) 
+count_categorical <- sum(sapply(copy_dataset, function(x) is.factor(x) || is.character(x))) 
+cat("Number of Categorical Predictors:", count_categorical, "\n") 
+######### Timestamp Column Transformation ######### 
+# Convert timestamps 
+copy_dataset$start_time  
+<- as.POSIXct(copy_dataset$start_time,  
+%H:%M:%OS", tz = "UTC") 
+format = "%Y-%m-%d 
+copy_dataset$update_time <- as.POSIXct(copy_dataset$update_time, format = "%Y-%m-%d 
+%H:%M:%OS", tz = "UTC") 
+# Create engineered time features 
+start_hour  <- as.numeric(format(copy_dataset$start_time,  "%H")) 
+start_wday  <- as.factor(weekdays(copy_dataset$start_time)) 
+update_hour <- as.numeric(format(copy_dataset$update_time, "%H")) 
+update_wday <- as.factor(weekdays(copy_dataset$update_time)) 
+# Concatenate engineered columns with original dataset 
+updated_dataset <- cbind(copy_dataset, start_hour, start_wday, update_hour, update_wday) 
+cat("Structure of updated_dataset after timestamp engineering:\n") 
+str(updated_dataset) 
+head(updated_dataset) 
+##### UPDATED DATASET PREDICTOR OVERVIEW #### 
+# Numeric columns 
+updated_dataset_numeric <- sapply(updated_dataset, is.numeric) 
+continuous_updated_dataset <- updated_dataset[, updated_dataset_numeric] 
+cat("Updated Continuous Predictors:\n") 
+names(continuous_updated_dataset) 
+cat("Number of updated continuous predictors:", sum(updated_dataset_numeric), "\n") 
+# Categorical columns 
+categorical_updated_dataset 
+is.factor(x) || is.character(x))] 
+<- 
+updated_dataset[, 
+cat("Updated Categorical Predictors:\n") 
+names(categorical_updated_dataset) 
+cat("Number of updated categorical predictors:", 
+sapply(updated_dataset, 
+sum(sapply(updated_dataset, function(x) is.factor(x) || is.character(x))), "\n") 
+function(x) 
+###########################  STEP 2: MISSING ########################### 
+# (Missing values handled BEFORE dummy variables) 
+# Separate predictors and response 
+predictors_raw <- updated_dataset[, !(names(updated_dataset) == "energy")] 
+response       
+<- updated_dataset$energy 
+# Split numeric and categorical 
+num_part <- predictors_raw[, sapply(predictors_raw, is.numeric), drop = FALSE] 
+cat_part <- predictors_raw[, sapply(predictors_raw, function(x) is.factor(x) || is.character(x)), 
+drop = FALSE] 
+# Check missing before imputation 
+missing_before_num <- sum(is.na(num_part)) 
+cat("Total missing values in numeric predictors BEFORE imputation:", missing_before_num, 
+"\n") 
+# KNN imputation on numeric variables only 
+preprocess_missing <- preProcess( 
+num_part, 
+method = c("knnImpute") 
+) 
+num_imputed <- predict(preprocess_missing, num_part) 
+missing_after_num <- sum(is.na(num_imputed)) 
+cat("Total missing values in numeric predictors AFTER imputation:", missing_after_num, "\n") 
+# Recombine numeric (imputed) + categorical + response 
+dataset_after_missing <- data.frame( 
+num_imputed, 
+cat_part, 
+energy = response 
+) 
+#=======  VISUALIZATION: MISSING VALUES (ALL PREDICTORS)  =======# 
+missing_counts <- colSums(is.na(dataset_after_missing[, !(names(dataset_after_missing) == 
+"energy")])) 
+missing_df <- data.frame( 
+Predictor = names(missing_counts), 
+Missing   = missing_counts 
+) 
+ggplot(missing_df, aes(x = Predictor, y = 1, fill = Missing)) + 
+geom_tile(color = "white") + 
+scale_fill_gradient(low = "white", high = "red") + 
+theme_minimal() + 
+theme( 
+axis.title.y = element_blank(), 
+axis.text.y  = element_blank(), 
+axis.ticks.y = element_blank(), 
+axis.text.x  = element_text(angle = 45, hjust = 1) 
+) + 
+labs( 
+title = "Missing Values Heatmap", 
+x     = "Predictors", 
+fill  = "Missing Count" 
+) 
+########################  STEP 3: DUMMY VARIABLES  ##################### 
+# Separate predictors and response 
+predictors_mv <- dataset_after_missing[, !(names(dataset_after_missing) == "energy")] 
+response_mv   <- dataset_after_missing$energy 
+# Identify categorical and numeric predictors 
+cat_vars <- predictors_mv[ 
+, sapply(predictors_mv, function(x) is.factor(x) || is.character(x)), 
+drop = FALSE 
+] 
+num_vars <- predictors_mv[ 
+, sapply(predictors_mv, is.numeric), 
+drop = FALSE 
+] 
+# Remove ID-like columns from categoricals 
+id_like <- c("run_id", "run_id.1", "node") 
+cat_vars <- cat_vars[ 
+, !(names(cat_vars) %in% id_like), 
+drop = FALSE 
+] 
+# Ensure all categorical vars are factors 
+for (c in names(cat_vars)) { 
+cat_vars[[c]] <- as.factor(cat_vars[[c]]) 
+} 
+# Remove single-level factors 
+cat_vars <- cat_vars[ 
+, sapply(cat_vars, function(x) nlevels(x) > 1), 
+drop = FALSE 
+] 
+# Dummy Encoding 
+if (ncol(cat_vars) > 0) { 
+dummy_model <- dummyVars(" ~ .", data = cat_vars, fullRank = TRUE) 
+dummy_data  <- as.data.frame(predict(dummy_model, newdata = cat_vars)) 
+} else { 
+dummy_data <- NULL 
+} 
+# Combine numeric + dummy predictors 
+if (!is.null(dummy_data)) { 
+predictors_encoded <- cbind(num_vars, dummy_data) 
+} else { 
+predictors_encoded <- num_vars 
+} 
+final_dataset <- data.frame(predictors_encoded, energy = response_mv) 
+cat("Dummy encoding completed. Total predictors now:", ncol(predictors_encoded), "\n") 
+########################  STEP 4: NZV & VISUALS  ####################### 
+# Identify NZV predictors 
+nzv_info <- nearZeroVar( 
+final_dataset[, !(names(final_dataset) == "energy")], 
+saveMetrics = TRUE 
+) 
+cat("NZV summary:\n") 
+print(nzv_info) 
+nzv_to_remove <- rownames(nzv_info[nzv_info$nzv == TRUE, ]) 
+cat("Number of NZV predictors removed:", length(nzv_to_remove), "\n") 
+cat("Removed NZV predictors:\n") 
+print(nzv_to_remove) 
+# Remove NZV predictors 
+dataset_after_nzv <- final_dataset[ 
+, !(names(final_dataset) %in% nzv_to_remove), 
+drop = FALSE 
+] 
+cat("Dimensions after NZV filtering:", dim(dataset_after_nzv), "\n") 
+#=======   VISUALIZATION: VARIANCE (NZV INSPECTION)  =======# 
+var_values <- sapply( 
+final_dataset[, !(names(final_dataset) == "energy")], 
+function(x) var(x, na.rm = TRUE) 
+) 
+var_df <- data.frame( 
+Predictor = names(var_values), 
+Variance  = var_values, 
+NZV       = names(var_values) %in% nzv_to_remove 
+) 
+ggplot(var_df, aes(x = reorder(Predictor, Variance), y = Variance, fill = NZV)) + 
+geom_bar(stat = "identity") + 
+scale_y_log10() + 
+coord_flip() + 
+scale_fill_manual(values = c("FALSE" = "steelblue", "TRUE" = "red")) + 
+labs( 
+title = "Predictor Variance (NZV Predictors Highlighted)", 
+x     = "Predictors", 
+y     = "Variance (log scale)", 
+fill  = "NZV?" 
+) + 
+theme_minimal() 
+#=====  VISUALIZATION: DISTRIBUTIONS OF NZV-REMOVED VARIABLES  =====# 
+before_cols <- names(final_dataset)[!(names(final_dataset) == "energy")] 
+after_cols  <- names(dataset_after_nzv)[!(names(dataset_after_nzv) == "energy")] 
+removed_cols <- setdiff(before_cols, after_cols) 
+cat("NZV Predictors Removed (Visual check):\n") 
+print(removed_cols) 
+if (length(removed_cols) > 0) { 
+nzv_removed_df <- final_dataset[, removed_cols, drop = FALSE] 
+nzv_long <- melt(nzv_removed_df) 
+ggplot(nzv_long, aes(x = value)) + 
+geom_histogram(bins = 30, fill = "red", color = "black") + 
+facet_wrap(~variable, scales = "free", ncol = 2) + 
+theme_minimal() + 
+labs( 
+title = "Distributions of Predictors Removed by NZV", 
+x     = "Value", 
+y     = "Frequency" 
+) 
+} else { 
+cat("No NZV variables to visualize.\n") 
+} 
+###################  STEP 5: TRAIN / TEST SPLIT  ####################### 
+set.seed(2025) 
+predictors_nzv <- dataset_after_nzv[, !(names(dataset_after_nzv) == "energy")] 
+response_nzv   <- dataset_after_nzv$energy 
+train_index <- createDataPartition(response_nzv, p = 0.8, list = FALSE) 
+train_data <- dataset_after_nzv[train_index, ] 
+test_data  <- dataset_after_nzv[-train_index, ] 
+cat("Train size:", nrow(train_data), "\n") 
+cat("Test size :", nrow(test_data), "\n") 
+X_train_full <- train_data[, !(names(train_data) == "energy")] 
+y_train      
+<- train_data$energy 
+X_test_full  <- test_data[, !(names(test_data) == "energy")] 
+y_test       
+<- test_data$energy 
+#############  STEP 6: TRAINING COPIES & TRANSFORMATIONS  ############## 
+#----------- Copy 1: WITH Collinearity cutoff (0.85), then Box-Cox + Spatial Sign ----# 
+X_train_c1 <- X_train_full 
+# Correlation & collinearity cutoff on training only 
+cor_train_c1 <- cor(X_train_c1, use = "pairwise.complete.obs") 
+high_corr_idx_c1   <- findCorrelation(cor_train_c1, cutoff = 0.85) 
+high_corr_names_c1 <- colnames(X_train_c1)[high_corr_idx_c1] 
+cat("Copy 1 - Predictors removed due to correlation > 0.85:\n") 
+print(high_corr_names_c1) 
+# Remove from training 
+if (length(high_corr_idx_c1) > 0) { 
+X_train_c1 <- X_train_c1[, -high_corr_idx_c1, drop = FALSE] 
+} 
+# Box-Cox + center + scale on training (Copy 1) 
+preprocess_c1 <- preProcess( 
+X_train_c1, 
+method = c("BoxCox", "center", "scale") 
+) 
+X_train_c1_bc <- predict(preprocess_c1, X_train_c1) 
+# Spatial Sign (Copy 1) 
+X_train_c1_final <- spatialSign(X_train_c1_bc) 
+# Prepare corresponding test predictors for Copy 1 
+X_test_c1 <- X_test_full[, colnames(X_train_c1), drop = FALSE] 
+X_test_c1_bc <- predict(preprocess_c1, X_test_c1) 
+X_test_c1_final <- spatialSign(X_test_c1_bc) 
+#----------- Copy 2: NO Collinearity cutoff; Box-Cox + Spatial Sign ----# 
+X_train_c2 <- X_train_full 
+preprocess_c2 <- preProcess( 
+X_train_c2, 
+method = c("BoxCox", "center", "scale") 
+) 
+X_train_c2_bc <- predict(preprocess_c2, X_train_c2) 
+X_train_c2_final <- spatialSign(X_train_c2_bc) 
+# Test set for Copy 2 
+X_test_c2 <- X_test_full[, colnames(X_train_c2), drop = FALSE] 
+X_test_c2_bc <- predict(preprocess_c2, X_test_c2) 
+X_test_c2_final <- spatialSign(X_test_c2_bc) 
+###################### Transformation Visuals ###################### 
+# Example: Histograms Before vs After Box-Cox on a few variables (Copy 2) 
+all_vars_c2 <- colnames(X_train_c2) 
+if (length(all_vars_c2) > 0) { 
+for (i in seq(1, min(6, length(all_vars_c2)), by = 3)) { 
+vars_chunk <- all_vars_c2[i:min(i+2, length(all_vars_c2))] 
+par(mfrow = c(3, 2)) 
+for (v in vars_chunk) { 
+hist(X_train_c2[[v]], 
+main = paste(v, "- Before BoxCox (Train)"), 
+col  = "tomato", border = "white") 
+hist(X_train_c2_bc[[v]], 
+main = paste(v, "- After BoxCox (Train)"), 
+col  = "steelblue", border = "white") 
+} 
+par(mfrow = c(1,1)) 
+} 
+} 
+########################  STEP 7: MODEL BUILDING  ###################### 
+pp_y <- preProcess( 
+data.frame(y = y_train), 
+method = c("center", "scale") 
+) 
+y_train_scaled_df <- predict(pp_y, data.frame(y = y_train)) 
+y_train_scaled    <- y_train_scaled_df$y 
+# Helper to invert scaling on predictions 
+inv_scale_y <- function(y_scaled, pp_obj) { 
+mu  <- pp_obj$mean["y"] 
+sig <- pp_obj$std["y"] 
+return(y_scaled * sig + mu) 
+} 
+# TrainControl 
+ctrl <- trainControl( 
+method = "cv", 
+number = 10, 
+verboseIter = TRUE, 
+savePredictions = "final" 
+) 
+####################### MODELS USING COPY 1 ############################# 
+# Linear Regression (OLS), Neural Network, MARS 
+## 1. Linear Regression (OLS) 
+set.seed(1) 
+fit_lm <- train( 
+x = X_train_c1_final, 
+y = y_train_scaled, 
+preProcess = c("center", "scale"), 
+method = "lm", 
+trControl = ctrl 
+) 
+print(fit_lm) 
+## 2. Neural Network (avNNet) 
+nnet_grid <- expand.grid( 
+.size  = c(3, 5, 7, 9), 
+.decay = c(0.001, 0.01, 0.1), 
+.bag   = FALSE 
+) 
+set.seed(1) 
+fit_nnet <- train( 
+x = X_train_c1_final, 
+y = y_train_scaled, 
+preProcess = c("center", "scale","spatialSign"), 
+method  = "avNNet", 
+tuneGrid = nnet_grid, 
+linout   = TRUE, 
+trace    = FALSE, 
+maxit    = 500, 
+trControl = ctrl 
+) 
+## 3. MARS (earth) 
+mars_grid <- expand.grid( 
+.degree = 1:2, 
+.nprune = 2:50 
+) 
+set.seed(1) 
+fit_mars <- train( 
+x = X_train_c1_final, 
+y = y_train_scaled, 
+preProcess = c("center", "scale"), 
+method   = "earth", 
+tuneGrid = mars_grid, 
+trControl = ctrl 
+) 
+####################### MODELS USING COPY 2 ############################# 
+# PLS, Ridge, Lasso, Elastic Net, SVM, KNN 
+## 4. PLS 
+set.seed(1) 
+fit_pls <- train( 
+x = X_train_c2_final, 
+y = y_train_scaled, 
+preProcess = c("center", "scale"), 
+method     = "pls", 
+tuneLength = 20, 
+trControl  = ctrl 
+) 
+## 5. Ridge Regression 
+ridge_grid <- data.frame(.lambda = seq(0, 0.1, length = 15)) 
+set.seed(1) 
+fit_ridge <- train( 
+x = X_train_c2_final, 
+y = y_train_scaled, 
+preProcess = c("center", "scale"), 
+method   = "ridge", 
+tuneGrid = ridge_grid, 
+trControl = ctrl 
+) 
+## 6. Lasso 
+lasso_grid <- data.frame(.fraction = seq(0.05, 1, length = 20)) 
+set.seed(1) 
+fit_lasso <- train( 
+x = X_train_c2_final, 
+y = y_train_scaled, 
+preProcess = c("center", "scale"), 
+method   = "lasso", 
+tuneGrid = lasso_grid, 
+trControl = ctrl 
+) 
+## 7. Elastic Net (ENet) 
+enet_grid <- expand.grid( 
+.lambda   = c(0, 0.01, 0.1), 
+.fraction = seq(0.05, 1, length = 20) 
+) 
+set.seed(1) 
+fit_enet <- train( 
+x = X_train_c2_final, 
+y = y_train_scaled, 
+preProcess = c("center", "scale"), 
+method   = "enet", 
+tuneGrid = enet_grid, 
+trControl = ctrl 
+) 
+## 8. SVM Radial 
+set.seed(1) 
+fit_svm <- train( 
+x = X_train_c2_final, 
+y = y_train_scaled, 
+preProcess = c("center", "scale"), 
+method     = "svmRadial", 
+tuneLength = 10, 
+trControl  = ctrl 
+) 
+## 9. KNN 
+knn_grid <- data.frame(.k = 1:20) 
+set.seed(1) 
+fit_knn <- train( 
+x = X_train_c2_final, 
+y = y_train_scaled, 
+preProcess = c("center", "scale"), 
+method   = "knn", 
+tuneGrid = knn_grid, 
+trControl = ctrl 
+) 
+########################  STEP 8: EVALUATION  ########################## 
+# Collect all models 
+model_list <- list(LM     
+= fit_lm,NNet   = fit_nnet,MARS   = fit_mars,PLS    = fit_pls,Ridge  = 
+fit_ridge,Lasso  = fit_lasso,ENet   = fit_enet,SVM    = fit_svm,KNN    = fit_knn) 
+#################### TRAINING PERFORMANCE (SCALED Y) ################### 
+evaluate_model_scaled <- function(model_name, model_object) { 
+perf <- getTrainPerf(model_object) 
+cat("\nModel:", model_name, "(on SCALED target)\n") 
+cat("RMSE (scaled):", round(perf$TrainRMSE, 4), "\n") 
+cat("R-sq  (scaled):", round(perf$TrainRsquared, 4), "\n") 
+cat("MAE  (scaled):", round(perf$TrainMAE, 4), "\n") 
+} 
+cat("\n====================================\n") 
+cat(" MODEL PERFORMANCE (TRAINING RESAMPLES, SCALED Y)\n") 
+cat("====================================\n") 
+evaluate_model_scaled("Linear Regression (LM)", fit_lm) 
+evaluate_model_scaled("Neural Network",         
+fit_nnet) 
+evaluate_model_scaled("MARS",                   
+evaluate_model_scaled("PLS",                    
+evaluate_model_scaled("Ridge Regression",       
+evaluate_model_scaled("Lasso",                  
+fit_mars) 
+fit_pls) 
+fit_ridge) 
+fit_lasso) 
+evaluate_model_scaled("Elastic Net (ENet)",     fit_enet) 
+evaluate_model_scaled("SVM Radial",             
+fit_svm) 
+evaluate_model_scaled("KNN",                    
+fit_knn) 
+###################### TEST SET EVALUATION (UNSCALED) ################## 
+# 1) Predict in SCALED space 
+# Models trained on Copy 1 use X_test_c1_final 
+pred_lm_scaled    <- predict(fit_lm,    newdata = X_test_c1_final) 
+pred_nnet_scaled  <- predict(fit_nnet,  newdata = X_test_c1_final) 
+pred_mars_scaled  <- predict(fit_mars,  newdata = X_test_c1_final) 
+# Models trained on Copy 2 use X_test_c2_final 
+pred_pls_scaled   <- predict(fit_pls,   newdata = X_test_c2_final) 
+pred_ridge_scaled <- predict(fit_ridge, newdata = X_test_c2_final) 
+pred_lasso_scaled <- predict(fit_lasso, newdata = X_test_c2_final) 
+pred_enet_scaled  <- predict(fit_enet,  newdata = X_test_c2_final) 
+pred_svm_scaled   <- predict(fit_svm,   newdata = X_test_c2_final) 
+pred_knn_scaled   <- predict(fit_knn,   newdata = X_test_c2_final) 
+# 2) Back-transform to ORIGINAL energy units 
+pred_lm    <- inv_scale_y(pred_lm_scaled,    pp_y) 
+pred_nnet  <- inv_scale_y(pred_nnet_scaled,  pp_y) 
+pred_mars  <- inv_scale_y(pred_mars_scaled,  pp_y) 
+pred_pls   <- inv_scale_y(pred_pls_scaled,   pp_y) 
+pred_ridge <- inv_scale_y(pred_ridge_scaled, pp_y) 
+pred_lasso <- inv_scale_y(pred_lasso_scaled, pp_y) 
+pred_enet  <- inv_scale_y(pred_enet_scaled,  pp_y) 
+pred_svm   <- inv_scale_y(pred_svm_scaled,   pp_y) 
+pred_knn   <- inv_scale_y(pred_knn_scaled,   pp_y) 
+# 3) Compute metrics in ORIGINAL units 
+perf_lm    <- postResample(pred_lm,    y_test) 
+perf_nnet  <- postResample(pred_nnet,  y_test) 
+perf_mars  <- postResample(pred_mars,  y_test) 
+perf_pls   <- postResample(pred_pls,   y_test) 
+perf_ridge <- postResample(pred_ridge, y_test) 
+perf_lasso <- postResample(pred_lasso, y_test) 
+perf_enet  <- postResample(pred_enet,  y_test) 
+perf_svm   <- postResample(pred_svm,   y_test) 
+perf_knn   <- postResample(pred_knn,   y_test) 
+test_results <- rbind( 
+data.frame(Model = "LM",     t(perf_lm)), 
+data.frame(Model = "NNet",   t(perf_nnet)), 
+data.frame(Model = "MARS",   t(perf_mars)), 
+data.frame(Model = "PLS",    t(perf_pls)), 
+data.frame(Model = "Ridge",  t(perf_ridge)), 
+data.frame(Model = "Lasso",  t(perf_lasso)), 
+data.frame(Model = "ENet",   t(perf_enet)), 
+data.frame(Model = "SVM",    t(perf_svm)), 
+data.frame(Model = "KNN",    t(perf_knn)) 
+) 
+cat("\n====================================\n") 
+cat(" TEST SET PERFORMANCE (ALL MODELS, ORIGINAL SCALE)\n") 
+cat("====================================\n") 
+print(test_results) 
+########################  TUNING PLOTS (SCALED Y)  ##################### 
+plot(fit_ridge, main = "Ridge Regression: RMSE vs Lambda (Scaled Target)") 
+plot(fit_pls,   main = "PLS: RMSE vs Number of Components (Scaled Target)") 
+plot(fit_lasso, main = "Lasso: RMSE vs Fraction (Scaled Target)") 
+plot(fit_enet,  main = "Elastic Net: RMSE vs Fraction & Lambda (Scaled Target)") 
+plot(fit_mars,  main = "MARS: RMSE across Degree and nprune (Scaled Target)") 
+plot(fit_svm,   main = "SVM Radial: RMSE vs Cost/Sigma (Scaled Target)") 
+plot(fit_knn,   main = "KNN: RMSE vs K (Scaled Target)") 
+plot(fit_nnet,  main = "Neural Network: RMSE vs Size/Decay (Scaled Target)") 
+###############  IDENTIFY BEST TWO MODELS (TEST SET)  ################## 
+test_results_all <- data.frame( 
+Model = c("LM", "NNet", "MARS", "PLS", "Ridge", "Lasso", "ENet", "SVM", "KNN"), 
+RMSE = c(perf_lm["RMSE"],perf_nnet["RMSE"],perf_mars["RMSE"],perf_pls["RMSE"], 
+perf_ridge["RMSE"],perf_lasso["RMSE"],perf_enet["RMSE"],perf_svm["RMSE"],perf_knn["R
+MSE"] ), 
+Rsquared = c( perf_lm["Rsquared"],perf_nnet["Rsquared"], 
+perf_mars["Rsquared"],perf_pls["Rsquared"],perf_ridge["Rsquared"],perf_lasso["Rsquared"], 
+perf_enet["Rsquared"],perf_svm["Rsquared"],perf_knn["Rsquared"  ), 
+MAE = c(perf_lm["MAE"],perf_nnet["MAE"],perf_mars["MAE"], 
+perf_pls["MAE"],perf_ridge["MAE"],perf_lasso["MAE"],perf_enet["MAE"],perf_svm["MAE"], 
+perf_knn["MAE"] 
+) 
+) 
+cat("\n=============================================\n") 
+cat("  FULL TEST SET PERFORMANCE TABLE (ORIGINAL SCALE)\n") 
+cat("=============================================\n") 
+print(test_results_all) 
+# Rank by RMSE (lower = better) 
+test_results_sorted <- test_results_all[order(test_results_all$RMSE), ] 
+cat("\n=============================================\n") 
+cat("  MODELS RANKED BY TEST RMSE (ORIGINAL SCALE)\n") 
+cat("=============================================\n") 
+print(test_results_sorted) 
+# Select Best Two Models 
+best_two_models <- test_results_sorted$Model[1:2] 
+cat("\n=============================================\n") 
+cat("   BEST TWO MODELS BASED ON TEST RMSE\n") 
+cat("=============================================\n") 
+print(best_two_models) 
+# Store the actual model objects 
+best_model_1 <- model_list[[ best_two_models[1] ]] 
+best_model_2 <- model_list[[ best_two_models[2] ]] 
+cat("\nBest Model 1:", best_two_models[1], "\n") 
+cat("Best Model 2:", best_two_models[2], "\n") 
+# Generate test predictions for top 2 (already in original scale) 
+if (best_two_models[1] %in% c("LM","NNet","MARS")) { 
+pred_best1_scaled <- predict(best_model_1, X_test_c1_final) 
+} else { 
+pred_best1_scaled <- predict(best_model_1, X_test_c2_final) 
+} 
+pred_best1 <- inv_scale_y(pred_best1_scaled, pp_y) 
+if (best_two_models[2] %in% c("LM","NNet","MARS")) { 
+pred_best2_scaled <- predict(best_model_2, X_test_c1_final) 
+} else { 
+pred_best2_scaled <- predict(best_model_2, X_test_c2_final) 
+} 
+pred_best2 <- inv_scale_y(pred_best2_scaled, pp_y) 
+perf_best1 <- postResample(pred_best1, y_test) 
+perf_best2 <- postResample(pred_best2, y_test) 
+cat("\n=============================================\n") 
+cat("   TOP TWO MODELS: FINAL TEST PERFORMANCE (ORIGINAL SCALE)\n") 
+cat("=============================================\n") 
+cat("\nModel:", best_two_models[1], "\n") 
+print(perf_best1) 
+cat("\nModel:", best_two_models[2], "\n") 
+print(perf_best2) 
+########################### PRINT ALL MODELS ############################ 
+cat("\n==================== MODEL OBJECTS ====================\n") 
+for (m in names(model_list)) { 
+cat("\n---------------", m, "---------------\n") 
+print(model_list[[m]]) 
+} 
+############ TRAINING PERFORMANCE IN SCALED UNITS (RMSE, MAE, R2) ###### 
+cat("\n\n==================== 
+====================\n") 
+train_metrics <- data.frame() 
+TRAINING METRICS (SCALED TARGET) 
+for (m in names(model_list)) { 
+perf <- getTrainPerf(model_list[[m]]) 
+train_metrics <- rbind( 
+train_metrics, 
+data.frame( 
+Model = m, 
+RMSE_scaled = perf$TrainRMSE, 
+MAE_scaled  = perf$TrainMAE, 
+R2_scaled   = perf$TrainRsquared 
+) 
+) 
+} 
+print(train_metrics) 
+############## TEST PERFORMANCE (SCALED TARGET) ########## 
+cat("\n\n==================== 
+====================\n") 
+# Predict using scaled target 
+pred_scaled_list <- list( 
+TEST 
+LM    = predict(fit_lm,   X_test_c1_final), 
+NNet  = predict(fit_nnet, X_test_c1_final), 
+MARS  = predict(fit_mars, X_test_c1_final), 
+PLS   = predict(fit_pls,  X_test_c2_final), 
+Ridge = predict(fit_ridge, X_test_c2_final), 
+Lasso = predict(fit_lasso, X_test_c2_final), 
+ENet  = predict(fit_enet, X_test_c2_final), 
+SVM   = predict(fit_svm,  X_test_c2_final), 
+KNN   = predict(fit_knn,  X_test_c2_final) 
+) 
+test_metrics_scaled <- data.frame() 
+# Scale the y_test for comparison 
+METRICS 
+y_test_scaled <- predict(pp_y, data.frame(y = y_test))$y 
+for (m in names(pred_scaled_list)) { 
+pred <- pred_scaled_list[[m]] 
+perf <- postResample(pred, y_test_scaled) 
+test_metrics_scaled <- rbind( 
+test_metrics_scaled, 
+data.frame( 
+Model = m, 
+RMSE_scaled = perf["RMSE"], 
+(SCALED 
+TARGET) 
+MAE_scaled  = perf["MAE"], 
+R2_scaled   = perf["Rsquared"] 
+) 
+) 
+} 
+print(test_metrics_scaled) 
+######################## TOP 10 PREDICTORS ######################## 
+# NNet importance (Copy 1) 
+nn_imp <- varImp(fit_nnet)$importance 
+nn_imp$Predictor <- rownames(nn_imp) 
+top10_nn <- nn_imp[order(-nn_imp$Overall), ][1:10, ] 
+cat("\nTop 10 Predictors for NNet:\n") 
+print(top10_nn) 
+barplot(top10_nn$Overall, 
+names.arg = top10_nn$Predictor, 
+las = 2, 
+cex.names = 0.7, 
+main = "Top 10 Predictors - NNET Model", 
+col = "darkblue") 
+# SVM importance (Copy 2) 
+svm_imp <- varImp(fit_svm)$importance 
+svm_imp$Predictor <- rownames(svm_imp) 
+top10_svm <- svm_imp[order(-svm_imp$Overall), ][1:10, ] 
+cat("\nTop 10 Predictors for SVM:\n") 
+print(top10_svm) 
+barplot(top10_svm$Overall, 
+names.arg = top10_svm$Predictor, 
+las = 2, 
+cex.names = 0.7, 
+main = "Top 10 Predictors - SVM Model", 
+col = "darkred") 
+# ---------------- Residuals vs Fitted ---------------- # 
+par(mfrow = c(1,1)) 
+lm_residuals <- resid(fit_lm$finalModel) 
+lm_fitted    <- fitted(fit_lm$finalModel) 
+plot( 
+lm_fitted, lm_residuals, 
+pch = 19, col = "steelblue", 
+xlab = "Fitted Values", 
+ylab = "Residuals", 
+main = "Residuals vs Fitted (OLS)" 
+) 
+abline(h = 0, col = "red", lwd = 2) 
+# ---------------- Actual vs Fitted ---------------- # 
+actual <- y_train              
+# your training target 
+fitted_vals <- lm_fitted 
+plot( 
+actual, fitted_vals, 
+pch = 19, col = "darkgreen", 
+xlab = "Actual Values", 
+ylab = "Fitted Values", 
+main = "Actual vs Fitted (OLS)" 
+) 
+abline(0, 1, col = "red", lwd = 2)   # 1-to-1 perfect fit line 
+ggplot(final_dataset, aes(x = energy)) + 
+geom_density(fill = "darkorange", alpha = 0.6, color = "black") + 
+labs( 
+title = "Density Plot of Energy (After Preprocessing)", 
+x = "Energy", 
+y = "Density" 
+) + 
+theme_minimal() 
